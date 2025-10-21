@@ -141,10 +141,16 @@ class TradeEngine:
                 else:
                     sim["result"] = "win" if exit_price <= sim["entry_price"] else "loss"
 
-                print(
-                    f"[INDICATORS] EMA8:{self.cb.indicators['ema8']:.5f} | EMA21:{self.cb.indicators['ema21']:.5f} | "
-                    f"RSI:{self.cb.indicators['rsi']:.1f} | Momentum:{self.cb.indicators['momentum']:.2f} | "
-                    f"Confidence:{self.last_confidence:.2f}" if self.last_confidence is not None else
-                    f"[INDICATORS] EMA8:{self.cb.indicators['ema8']:.5f} | EMA21:{self.cb.indicators['ema21']:.5f} | "
-                    f"RSI:{self.cb.indicators['rsi']:.1f} | Momentum:{self.cb.indicators['momentum']:.2f}"
-                )
+                i = self.cb.indicators
+                required_keys = ["ema8", "ema21", "momentum", "rsi", "choppiness", "boll_low", "boll_high"]
+
+                if all(k in i and i[k] is not None for k in required_keys):
+                    conf = self.last_confidence if self.last_confidence is not None else 0.0
+                    print(
+                        f"[INDICATORS] EMA8:{i['ema8']:.5f} | EMA21:{i['ema21']:.5f} | "
+                        f"RSI:{i['rsi']:.1f} | Momentum:{i['momentum']:.2f} | "
+                        f"Choppiness:{i['choppiness']:.1f} | BollLow:{i['boll_low']:.5f} | BollHigh:{i['boll_high']:.5f} | "
+                        f"Confidence:{conf:.2f}"
+                    )
+                else:
+                    print("[INDICATORS] Not ready")

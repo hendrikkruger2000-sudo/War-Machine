@@ -14,7 +14,7 @@ Types if import:
 IMPORTANT: Do NOT post this list to the issue-tracker. Use it as a basis for
             tracking down the missing module yourself. Thanks!
 
-missing module named pyimod02_importers - imported by C:\Users\Hendrik\PycharmProjects\War-Machine\.venv\Lib\site-packages\PyInstaller\hooks\rthooks\pyi_rth_pkgutil.py (delayed), C:\Users\Hendrik\PycharmProjects\War-Machine\.venv\Lib\site-packages\PyInstaller\hooks\rthooks\pyi_rth_pkgres.py (delayed)
+missing module named pyimod02_importers - imported by C:\PythonProject\War-Machine\.venv\Lib\site-packages\PyInstaller\hooks\rthooks\pyi_rth_pkgutil.py (delayed), C:\PythonProject\War-Machine\.venv\Lib\site-packages\PyInstaller\hooks\rthooks\pyi_rth_pkgres.py (delayed)
 missing module named pwd - imported by posixpath (delayed, conditional, optional), shutil (delayed, optional), tarfile (optional), pathlib (delayed, optional), subprocess (delayed, conditional, optional), http.server (delayed, optional), webbrowser (delayed), netrc (delayed, conditional), getpass (delayed), distutils.util (delayed, conditional, optional), setuptools._vendor.backports.tarfile (optional), distutils.archive_util (optional), setuptools._distutils.util (delayed, conditional, optional), setuptools._distutils.archive_util (optional)
 missing module named grp - imported by shutil (delayed, optional), tarfile (optional), pathlib (delayed, optional), subprocess (delayed, conditional, optional), setuptools._vendor.backports.tarfile (optional), distutils.archive_util (optional), setuptools._distutils.archive_util (optional)
 missing module named _posixsubprocess - imported by subprocess (conditional), multiprocessing.util (delayed)
@@ -54,11 +54,7 @@ excluded module named _frozen_importlib - imported by importlib (optional), impo
 missing module named vms_lib - imported by platform (delayed, optional)
 missing module named java - imported by platform (delayed)
 missing module named _winreg - imported by platform (delayed, optional)
-missing module named BinaryOptionsToolsV2.LogBuilder - imported by BinaryOptionsToolsV2 (top-level), BinaryOptionsToolsV2.tracing (top-level)
-missing module named BinaryOptionsToolsV2.start_tracing - imported by BinaryOptionsToolsV2 (top-level), BinaryOptionsToolsV2.tracing (top-level)
-missing module named BinaryOptionsToolsV2.Logger - imported by BinaryOptionsToolsV2 (top-level), BinaryOptionsToolsV2.pocketoption.asyncronous (top-level), BinaryOptionsToolsV2.tracing (top-level)
-missing module named BinaryOptionsToolsV2.RawPocketOption - imported by BinaryOptionsToolsV2 (top-level), BinaryOptionsToolsV2.pocketoption.asyncronous (top-level)
-missing module named BinaryOptionsToolsV2.RawValidator - imported by BinaryOptionsToolsV2 (delayed), BinaryOptionsToolsV2.validator (delayed)
+missing module named BinaryOptionsToolsV2 - imported by TradingBot (top-level)
 missing module named _dummy_thread - imported by numpy._core.arrayprint (optional)
 missing module named 'numpy_distutils.cpuinfo' - imported by numpy.f2py.diagnose (delayed, conditional, optional)
 missing module named 'numpy_distutils.fcompiler' - imported by numpy.f2py.diagnose (delayed, conditional, optional)

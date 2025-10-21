@@ -6,4 +6,5 @@ async def main():
     bot = WarMachineBot(symbol="EURUSD_otc", mode="demo")
     await bot.start()
 
+
 asyncio.run(main())

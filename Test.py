@@ -1,616 +1,685 @@
-# war_machine_per_candle_fixed_window.py
-
-import sys
-import asyncio
-import json
-import os
-from datetime import datetime, timedelta
-
-from PyQt6.QtWidgets import (
-    QApplication, QWidget, QLabel, QPushButton, QHBoxLayout,
-    QComboBox, QGridLayout
-)
-from PyQt6.QtGui import QFont
-from PyQt6.QtCore import QTimer
-from qasync import QEventLoop
-import pyqtgraph as pg
-
-# Replace with your actual library import
-from BinaryOptionsToolsV2.pocketoption import PocketOptionAsync
+# main.py
+from fastapi import FastAPI, Request, UploadFile
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from datetime import datetime
+import qrcode
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import mm
+from reportlab.lib.colors import HexColor
+import sqlite3, json, os
 
 
-class TimeAxis(pg.AxisItem):
-    def tickStrings(self, values, scale, spacing):
-        out = []
-        for v in values:
-            try:
-                fv = float(v)
-                if fv > 0:
-                    out.append(datetime.fromtimestamp(fv).strftime("%H:%M"))
-                else:
-                    out.append("")
-            except Exception:
-                out.append("")
-        return out
+app = FastAPI()
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
+os.makedirs("static/waybills", exist_ok=True)
+os.makedirs("static/qrcodes", exist_ok=True)
+os.makedirs("static/uploads", exist_ok=True)
 
-class WarMachineGUI(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("War Machine ⚔️ — Per-Candle")
-        self.setGeometry(100, 100, 1400, 800)
-        self.setStyleSheet("background-color:#0d0d0d; color:#f2f2f2;")
+def init_db():
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
 
-        # Replace with your real SSIDs
-        self.ssid_demo = '42["auth",{"session":"pb7m1jl316va2k7gro84qs5t8a","isDemo":1,"uid":95806403,"platform":2}]'
-        self.ssid_real = '42["auth",{"session":"cee1286d4b06ad51b039409238b0a9aa","isDemo":0,"uid":95806403,"platform":2}]'
-        self.live_trades = {}
-        # API and balance
-        self.api = None
-        self.balance = 0.0
-        self.trade_amount = 20.0  # Default until balance is fetched
-        self.live_trades = {}
-        self.trade_stats = {
-            "wins": 0,
-            "losses": 0,
-            "total": 0,
-            "pnl": 0.0
-        }
-        # Candle state
-        self.candle_data = []           # finalized candles
-        self.current_candle = None      # forming candle
-        self.candle_start = None
-        self.symbol = "EURUSD_otc"
+    try:
+        # Create tables if they don't exist
+        cursor.execute("""CREATE TABLE IF NOT EXISTS updates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ops TEXT,
+            hmj TEXT,
+            haz TEXT,
+            company TEXT,
+            date TEXT,
+            time TEXT,
+            "update" TEXT
+        );""")
 
-        # Stream/task
-        self.stream_task = None
+        cursor.execute("""CREATE TABLE IF NOT EXISTS completed (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ops TEXT,
+            company TEXT,
+            delivery_date TEXT,
+            time TEXT,
+            signed_by TEXT,
+            document TEXT,
+            pod TEXT
+        );""")
 
-        # Persistence
-        self.storage_file = "war_machine_candles.json"
-        self.max_candles = 200
-        self.ensure_storage_file()
+        cursor.execute("""CREATE TABLE IF NOT EXISTS requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reference_number TEXT,
+            service_type TEXT,
+            collection_company TEXT,
+            collection_address TEXT,
+            collection_person TEXT,
+            collection_number TEXT,
+            delivery_company TEXT,
+            delivery_address TEXT,
+            delivery_person TEXT,
+            delivery_number TEXT,
+            client_reference TEXT,
+            pickup_date TEXT,
+            inco_terms TEXT,
+            client_notes TEXT,
+            pdf_path TEXT,
+            timestamp TEXT,
+            assigned_driver TEXT,
+            status TEXT
+        );""")
 
-        # Trades and stats
-        self.active_trade = None              # one live trade at a time
-        self.last_trade_candle_time = None    # enforce one trade per candle
-        self.stats = {"total": 0, "wins": 0, "losses": 0}
-        self.pnl = 0.0
-        self.trade_amount = 1.0
+        cursor.execute("""CREATE TABLE IF NOT EXISTS scan_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reference_number TEXT,
+            driver_id TEXT,
+            timestamp TEXT
+        );""")
 
-        # Strategy
-        self.min_warmup_candles = 10
-        self.expiry_otc_seconds = 5
-        self.expiry_fx_seconds = 60
+        print("✅ Tables created")
 
-        # Simulation gate
-        self.simulated_trades = []
-        self.live_mode = False
-        self.sim_backtest_window = 20
-        self.sim_required_winrate = 0.60
+        # Check if requests table is empty
+        cursor.execute("SELECT COUNT(*) FROM requests")
+        request_count = cursor.fetchone()[0]
 
-        # Chart config
-        self.window_seconds = 30 * 60    # fixed 30-minute window
-        self.x_shift_seconds = 30         # reserve space for markers on right
+        if request_count == 0:
+            print("🔁 Restoring database from JSON backups...")
 
-        # Debug overlay
-        self.last_overlay = ""
-        self.debug_text_item = pg.TextItem(text="", color='w', anchor=(0, 0))
+            def restore_table(json_path, table_name):
+                if os.path.exists(json_path):
+                    with open(json_path) as f:
+                        data = json.load(f)
+                        for row in data:
+                            cursor.execute(f"""
+                                INSERT INTO {table_name} ({','.join(row.keys())})
+                                VALUES ({','.join(['?'] * len(row))})
+                            """, list(row.values()))
+                    print(f"✅ Restored {table_name} from {json_path}")
 
-        # UI
-        self.init_ui()
-        self.showMaximized()
+            restore_table("static/backups/requests.json", "requests")
+            restore_table("static/backups/updates.json", "updates")
+            restore_table("static/backups/completed.json", "completed")
 
-    # ------------- UI -------------
-
-    def ensure_storage_file(self):
-        if not os.path.exists(self.storage_file):
-            with open(self.storage_file, "w") as f:
-                json.dump([], f)
-
-    def init_ui(self):
-        stat_font = QFont("Consolas", 14)
-
-        self.mode_switch = QComboBox()
-        self.mode_switch.addItems(["Demo", "Real"])
-        self.mode_switch.setStyleSheet("background-color:#333; color:#fff;")
-
-        self.balance_label = QLabel("Balance: $0.00")
-        self.balance_label.setFont(stat_font)
-
-        self.asset_selector = QComboBox()
-        self.asset_selector.addItems(["EURUSD_otc", "GBPUSD_otc", "USDJPY_otc"])
-        self.asset_selector.setCurrentText(self.symbol)
-        self.asset_selector.setStyleSheet("background-color:#333; color:#fff;")
-        self.asset_selector.currentTextChanged.connect(self.on_asset_change)
-
-        self.stats_label = QLabel("Trades: 0 | Wins: 0 | Losses: 0 | Winrate: 0% | PNL: 0.00")
-        self.stats_label.setFont(stat_font)
-
-        self.duration_label = QLabel("Duration: --s")
-        self.duration_label.setFont(stat_font)
-
-        top_layout = QHBoxLayout()
-        top_layout.addWidget(QLabel("Mode:"))
-        top_layout.addWidget(self.mode_switch)
-        top_layout.addSpacing(16)
-        top_layout.addWidget(QLabel("Asset:"))
-        top_layout.addWidget(self.asset_selector)
-        top_layout.addStretch()
-        top_layout.addWidget(self.balance_label)
-
-        self.chart_widget = pg.PlotWidget(axisItems={'bottom': TimeAxis(orientation='bottom')})
-        self.chart_widget.setBackground('#1a1a1a')
-        self.chart_widget.showGrid(x=True, y=True)
-        self.chart_widget.setLabel('left', 'Price')
-        self.chart_widget.setLabel('bottom', 'Time (HH:MM)')
-        self.chart_widget.addItem(self.debug_text_item)
-
-        self.start_button = QPushButton("START WAR MACHINE ⚔️")
-        self.stop_button = QPushButton("STOP WAR MACHINE 🛑")
-        self.start_button.setStyleSheet("background-color:#2e7d32; color:white; font-weight:bold;")
-        self.stop_button.setStyleSheet("background-color:#c62828; color:white; font-weight:bold;")
-        self.start_button.clicked.connect(lambda: asyncio.create_task(self.start_war_machine()))
-        self.stop_button.clicked.connect(lambda: asyncio.create_task(self.stop_war_machine()))
-
-        main_layout = QGridLayout()
-        main_layout.addLayout(top_layout, 0, 0, 1, 2)
-        main_layout.addWidget(self.chart_widget, 1, 0, 1, 2)
-        main_layout.addWidget(self.stats_label, 2, 0)
-        main_layout.addWidget(self.duration_label, 2, 1)
-        main_layout.addWidget(self.start_button, 3, 0)
-        main_layout.addWidget(self.stop_button, 3, 1)
-        self.setLayout(main_layout)
-
-        # Balance refresh timer
-        self.balance_timer = QTimer(self)
-        self.balance_timer.timeout.connect(lambda: asyncio.create_task(self.update_balance()))
-        self.balance_timer.start(5000)
-
-    # ------------- API -------------
-
-    async def connect_to_api(self):
-        mode = self.mode_switch.currentText().lower()
-        ssid = self.ssid_demo if mode == "demo" else self.ssid_real
-        self.api = PocketOptionAsync(ssid)
-        await asyncio.sleep(5)  # handshake
-        await self.update_balance()
-
-    async def update_balance(self):
-        try:
-            bal = await self.api.balance()
-            self.balance = float(bal)
-            self.balance_label.setText(f"Balance: ${self.balance:.2f}")
-        except Exception:
-            # keep UI stable if balance fetch fails
-            pass
-
-    async def update_trade_amount(self):
-        try:
-            balance = await self.api.get_balance()  # ✅ await if async
-            raw_amount = balance * 0.2
-            self.trade_amount = max(20, min(raw_amount, 2000))
-            print(f"[BALANCE] {balance:.2f} → Trade amount set to {self.trade_amount:.2f}")
-        except Exception as e:
-            print(f"[ERROR] Failed to fetch balance → {type(e).__name__}, {e}")
-            self.trade_amount = 20.0
-
-    def on_asset_change(self, asset):
-        self.symbol = asset
-        self.candle_data.clear()
-        self.current_candle = None
-        self.candle_start = None
-        self.last_trade_candle_time = None
-        self.chart_widget.clear()
-        self.chart_widget.addItem(self.debug_text_item)
-        if self.stream_task and not self.stream_task.done():
-            self.stream_task.cancel()
-        asyncio.create_task(self.restart_stream())
-
-    async def restart_stream(self):
-        if not self.api:
-            await self.connect_to_api()
-        self.stream_task = asyncio.create_task(self.stream_ticks_and_build_candles(self.symbol))
-
-    # --------- Streaming & candles ---------
-
-    async def stream_ticks_and_build_candles(self, symbol):
-        stream = await self.api.subscribe_symbol(symbol)
-        print(f"Streaming {symbol}...")
-
-        async for tick in stream:
-            price = tick.get('close') or tick.get('price') or tick.get('open')
-            if price is None:
-                continue
-
-            ts_raw = tick.get('timestamp') or tick.get('time') or tick.get('ts')
-            ts = float(ts_raw)
-            if ts > 1e12:
-                ts /= 1000.0
-            tick_time = datetime.utcfromtimestamp(ts)
-            bucket = tick_time.replace(second=0, microsecond=0)
-
-            if self.candle_start is None:
-                self.candle_start = bucket
-                self.current_candle = {
-                    "time": bucket,
-                    "open": price,
-                    "high": price,
-                    "low": price,
-                    "close": price,
-                    "ticks": [],
-                    "entries": [],
-                    "exits": []
-                }
-
-            elif bucket > self.candle_start:
-                print(f"[CANDLE OPEN] {bucket.strftime('%H:%M:%S')}")
-                try:
-                    self.finalize_current_candle()
-                except Exception as e:
-                    print(f"[ERROR] finalize_current_candle failed → {type(e).__name__}, {e}")
-
-                self.candle_start = bucket
-                self.current_candle = {
-                    "time": bucket,
-                    "open": price,
-                    "high": price,
-                    "low": price,
-                    "close": price,
-                    "ticks": [],
-                    "entries": [],
-                    "exits": []
-                }
-
-            # Update forming candle
-            self.current_candle["high"] = max(self.current_candle["high"], price)
-            self.current_candle["low"] = min(self.current_candle["low"], price)
-            self.current_candle["close"] = price
-            self.current_candle["ticks"].append((tick_time, price))
-
-            # 🔥 Per-tick micro momentum
-            await self.evaluate_micro_momentum_tick(price, tick_time)
-
-            # Lifecycle
-            await self.check_simulated_exits(tick_time)
-            await self.check_trade_exit_live(tick_time)
-
-            # Overlay
-            self.update_debug_overlay()
-            self.draw_chart(forming=True)
-
-
-    def finalize_current_candle(self):
-        if not self.current_candle:
-            return
-        candle_copy = self.current_candle.copy()
-        self.candle_data.append(candle_copy)
-        if len(self.candle_data) > self.max_candles:
-            self.candle_data.pop(0)
-
-        # persist (optional; keeps history across sessions)
-        try:
-            with open(self.storage_file, "r+") as f:
-                data = json.load(f)
-                data.append({
-                    "time": candle_copy["time"].isoformat(),
-                    "open": candle_copy["open"],
-                    "high": candle_copy["high"],
-                    "low": candle_copy["low"],
-                    "close": candle_copy["close"],
-                    "ticks": candle_copy["ticks"],
-                    "entries": candle_copy.get("entries", []),
-                    "exits": candle_copy.get("exits", [])
-                })
-                f.seek(0)
-                json.dump(data, f, indent=2)
-                f.truncate()
-        except Exception:
-            pass
-
-    # ------------- Strategy -------------
-
-    def ema(self, series, period):
-        if len(series) < period:
-            return None
-        k = 2 / (period + 1)
-        ema_val = series[-period]
-        for v in series[-period + 1:]:
-            ema_val = v * k + ema_val * (1 - k)
-        return ema_val
-
-    def decide_direction_per_candle(self):
-        # original logic: EMA20 filter, one trade per candle at open
-        if len(self.candle_data) < self.min_warmup_candles:
-            return None, "warm-up"
-        closes = [c["close"] for c in self.candle_data]
-        ema20 = self.ema(closes, 20)
-        if ema20 is None:
-            return None, "ema20-unavailable"
-
-        price_open = self.current_candle["open"]
-        trend_up = price_open >= ema20
-
-        prev = self.candle_data[-1] if self.candle_data else None
-        prev_color = None
-        if prev:
-            prev_color = "green" if prev["close"] >= prev["open"] else "red"
-
-        if trend_up:
-            return "buy", f"EMA20 UP (open {price_open:.5f} ≥ {ema20:.5f}); prev {prev_color}"
         else:
-            return "sell", f"EMA20 DOWN (open {price_open:.5f} < {ema20:.5f}); prev {prev_color}"
+            print("✅ hazmat.db already contains data — no restore needed")
 
-    async def evaluate_micro_momentum_tick(self, price, tick_time):
-        micro_dir, micro_conf = self.detect_micro_momentum(tick_window=10)
-        if not micro_dir or micro_conf < 0.6:
-            return
+        conn.commit()
+    except Exception as e:
+        print("❌ init_db() failed:", e)
+    finally:
+        conn.close()
+init_db()
 
-        # 🔍 Candle alignment filter
-        is_bullish = self.current_candle["close"] > self.current_candle["open"]
-        is_bearish = self.current_candle["close"] < self.current_candle["open"]
+def backup_database():
+    os.makedirs("static/backups", exist_ok=True)
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
+    try:
+        backup_database()
+    except Exception as e:
+        print("❌ Backup failed:", e)
 
-        # 🔥 Slope filter — INSERT HERE
-        candle_slope = self.current_candle["close"] - self.current_candle["open"]
-        if abs(candle_slope) < 0.0001:
-            return  # Skip flat candles
+    def dump_table(table_name, filename):
+        cursor.execute(f"SELECT * FROM {table_name}")
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+        with open(f"static/backups/{filename}", "w") as f:
+            json.dump([dict(zip(columns, row)) for row in rows], f, indent=2)
 
-        if micro_dir == "call" and not is_bullish:
-            return
-        if micro_dir == "put" and not is_bearish:
-            return
-
-        print(
-            f"[TRADE DECISION] {tick_time.strftime('%H:%M:%S')} | dir={micro_dir.upper()} | conf={micro_conf:.2f} | candle={'BULL' if is_bullish else 'BEAR'}")
-
-        self.simulate_trade(micro_dir, price, tick_time, duration=5)
-        await self.place_live_trade(micro_dir, price, tick_time, duration=5)
-        self.last_overlay = f"MICRO-{micro_dir.upper()} | conf:{int(micro_conf * 100)}%"
-
-    def detect_micro_momentum(self, tick_window=10):
-        if not self.current_candle or len(self.current_candle["ticks"]) < tick_window:
-            return None, 0.0
-
-        recent = self.current_candle["ticks"][-tick_window:]
-        prices = [p for (_, p) in recent]
-        tick_times = [ts for (ts, _) in recent]
-
-        delta = prices[-1] - prices[0]
-        if abs(delta) < 0.0002:
-            return None, 0.0  # 🔥 Skip weak moves
-
-        # Tick velocity filter
-        intervals = [(tick_times[i + 1] - tick_times[i]).total_seconds() for i in range(len(tick_times) - 1)]
-        avg_interval = sum(intervals) / len(intervals)
-        if avg_interval > 1.5:
-            return None, 0.0  # 🔥 Skip slow ticks
-
-        direction = "call" if delta > 0 else "put" if delta < 0 else None
-        moves = [prices[i + 1] - prices[i] for i in range(len(prices) - 1)]
-        bias_count = sum(1 for m in moves if (m > 0 and direction == "call") or (m < 0 and direction == "put"))
-        confidence = bias_count / len(moves) if direction else 0.0
-
-        return direction, confidence
+    dump_table("requests", "requests.json")
+    dump_table("updates", "updates.json")
+    dump_table("completed", "completed.json")
+    conn.close()
+    print("✅ Database backed up to JSON")
 
 
-    def update_duration_label(self, duration):
-        if duration is None:
-            self.duration_label.setText("Duration: --s")
-            self.duration_label.setStyleSheet("color: yellow;")
-            return
-        self.duration_label.setText(f"Duration: {duration}s")
-        self.duration_label.setStyleSheet("color: white;" if self.live_mode else "color: yellow;")
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return """
+    <html>
+      <head>
+        <title>Hazmat Collection System</title>
+        <link rel="icon" href="/icon.png" type="image/png">
+        <style>
+          body { font-family:Segoe UI; text-align:center; padding:2rem; background:#ECEFF1; }
+          h1 { color:#D32F2F; }
+          p { color:#455A64; }
+          button {
+            margin:1rem; padding:0.75rem 1.5rem;
+            background-color:#388E3C; color:white;
+            border:none; border-radius:4px;
+            font-size:1rem;
+          }
+        </style>
+      </head>
+      <body>
+        <img src="/logo.png" alt="Hazmat Logo" style="width:150px; margin-bottom:1rem;">
+        <h1>Welcome to Hazmat Collection System</h1>
+        <p>Choose an action below:</p>
+        <button onclick="window.location.href='/submit'">Book a Collection</button>
+        <button onclick="window.location.href='/track'">Track a Collection</button>
+      </body>
+    </html>
+    """
 
-    # ------------- Simulation -------------
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse("static/icon.png")
 
-    def simulate_trade(self, direction, price, tick_time, duration):
-        expiry = tick_time + timedelta(seconds=duration)
-        sim = {
-            "time": tick_time, "direction": direction,
-            "entry_price": price, "exit_time": expiry,
-            "exit_price": None, "result": None
-        }
-        self.simulated_trades.append(sim)
-        # mark sim entry
-        self.current_candle.setdefault("entries", []).append({
-            "direction": direction, "price": price, "sim": True
+@app.get("/ping")
+def ping():
+    return {"status": "awake"}
+
+@app.get("/ops/unassigned")
+def get_unassigned():
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT reference_number, collection_company, collection_address, pickup_date
+        FROM requests WHERE assigned_driver IS NULL AND status IS NOT 'Delivered'
+        ORDER BY timestamp DESC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"hazjnb_ref": r[0], "company": r[1], "address": r[2], "pickup_date": r[3]} for r in rows]
+
+@app.get("/ops/collections")
+def get_available_collections():
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT reference_number, collection_company, collection_address, pickup_date
+        FROM requests
+        WHERE assigned_driver IS NULL AND status IS NOT 'Delivered'
+        ORDER BY timestamp DESC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return [{
+        "hazjnb_ref": r[0],
+        "company": r[1],
+        "address": r[2],
+        "pickup_date": r[3]
+    } for r in rows]
+
+@app.get("/submit", response_class=HTMLResponse)
+def submit_form():
+    return """
+    <html>
+      <head>
+        <title>Book a Hazmat Collection</title>
+        <link rel="icon" href="/icon.png" type="image/png">
+        <style>
+          body { font-family:Segoe UI; padding:2rem; background:#ECEFF1; }
+          h1 { color:#D32F2F; text-align:center; }
+          form { max-width:600px; margin:auto; background:white; padding:2rem; border-radius:8px; }
+          label { display:block; margin-top:1rem; font-weight:bold; }
+          input, textarea, select {
+            width:100%; padding:0.5rem; margin-top:0.5rem;
+            border:1px solid #B0BEC5; border-radius:4px;
+          }
+          button {
+            margin-top:2rem; padding:0.75rem 1.5rem;
+            background-color:#388E3C; color:white;
+            border:none; border-radius:4px;
+            font-size:1rem;
+          }
+        </style>
+      </head>
+      <body>
+        <h1>Book a Hazmat Collection</h1>
+        <form action="/submit" method="post" enctype="multipart/form-data">
+          <label>Service Type</label>
+          <select name="serviceType">
+            <option value="local">Local</option>
+            <option value="export">Export</option>
+            <option value="import">Import</option>
+          </select>
+
+          <label>Collection Company</label>
+          <input type="text" name="collection_company_local">
+
+          <label>Collection Address</label>
+          <input type="text" name="collection_address_local">
+
+          <label>Pickup Date</label>
+          <input type="date" name="pickup_date_local">
+
+          <label>Delivery Company</label>
+          <input type="text" name="delivery_company_local">
+
+          <label>Delivery Address</label>
+          <input type="text" name="delivery_address_local">
+
+          <label>Client Reference</label>
+          <input type="text" name="client_reference_local">
+
+          <label>Client Notes</label>
+          <textarea name="client_notes_local"></textarea>
+
+          <label>Shipment Documents</label>
+          <input type="file" name="shipment_docs" multiple>
+
+          <button type="submit">Submit Collection Request</button>
+        </form>
+      </body>
+    </html>
+    """
+
+
+
+@app.get("/ops/assigned")
+def get_assigned():
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT reference_number, collection_company, collection_address, pickup_date, assigned_driver, status
+        FROM requests WHERE assigned_driver IS NOT NULL AND status IS NOT 'Delivered'
+        ORDER BY timestamp DESC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"hazjnb_ref": r[0], "company": r[1], "address": r[2], "pickup_date": r[3], "driver": r[4], "status": r[5]} for r in rows]
+
+@app.get("/driver/{code}")
+def get_driver_jobs(code: str):
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT reference_number, collection_company, collection_address, pickup_date
+        FROM requests WHERE assigned_driver = ?
+    """, (code,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"hazjnb_ref": r[0], "company": r[1], "address": r[2], "pickup_date": r[3]} for r in rows]
+
+
+@app.post("/scan_qr")
+def scan_qr(payload: dict):
+    ref = payload.get("ref")
+    driver_id = payload.get("driver_id")
+    timestamp = datetime.now().isoformat()
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO scan_log (reference_number, driver_id, timestamp) VALUES (?, ?, ?)
+    """, (ref, driver_id, timestamp))
+    cursor.execute("""
+        UPDATE requests SET status = 'Collected' WHERE reference_number = ?
+    """, (ref,))
+    conn.commit()
+    conn.close()
+    return {"status": "collected", "ref": ref, "driver": driver_id}
+
+@app.post("/ops/updates")
+def submit_update(payload: dict):
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO updates (ops, hmj, haz, company, date, time, update)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        payload["ops"], payload["hmj"], payload["haz"], payload["company"],
+        payload["date"], payload["time"], payload["update"]
+    ))
+    conn.commit()
+    conn.close()
+    backup_database()
+    return {"status": "update received"}
+
+
+@app.get("/ops/updates")
+def get_updates():
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
+    cursor.execute('SELECT ops, hmj, haz, company, date, time, "update" FROM updates ORDER BY id DESC')
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"ops": r[0], "hmj": r[1], "haz": r[2], "company": r[3], "date": r[4], "time": r[5], "update": r[6]} for r in rows]
+
+@app.post("/ops/completed")
+def submit_completed(payload: dict):
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO completed (ops, company, delivery_date, time, signed_by, document, pod)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        payload["ops"], payload["company"], payload["delivery_date"], payload["time"],
+        payload["signed_by"], payload["document"], payload["pod"]
+    ))
+    cursor.execute("""
+        UPDATE requests SET status = 'Delivered' WHERE reference_number = ?
+    """, (payload["haz_ref"],))
+    conn.commit()
+    conn.close()
+    backup_database()
+    return {"status": "completed"}
+
+
+@app.get("/ops/completed")
+def get_completed():
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT ops, company, delivery_date, time, signed_by, document, pod FROM completed ORDER BY id DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"ops": r[0], "company": r[1], "delivery_date": r[2], "time": r[3], "signed_by": r[4], "document": r[5], "pod": r[6]} for r in rows]
+
+# Remaining routes: /submit, /pdf/{id}, /confirm/{ref}, /thankyou, generate_pdf — already correct in your version
+
+@app.post("/submit")
+async def submit(request: Request):
+    form = await request.form()
+    files = await request.form()
+    uploaded_files = request._form.getlist("shipment_docs")
+
+    service_type = form.get("serviceType")
+
+    def get_field(name):
+        return form.get(f"{name}_local") or form.get(f"{name}_export") or form.get(f"{name}_import")
+
+    def get_inco():
+        if service_type == "local":
+            return "DTD"
+        return form.get("inco_terms_export") or form.get("inco_terms_import") or "N/A"
+
+    collection_company = get_field("collection_company")
+    collection_address = get_field("collection_address")
+    collection_person = get_field("collection_person")
+    collection_number = get_field("collection_number")
+    delivery_company = get_field("delivery_company")
+    delivery_address = get_field("delivery_address")
+    delivery_person = get_field("delivery_person")
+    delivery_number = get_field("delivery_number")
+    client_reference = get_field("client_reference")
+    pickup_date = get_field("pickup_date")
+    client_notes = get_field("client_notes")
+    inco_terms = get_inco()
+    timestamp = datetime.now().isoformat()
+
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
+    counter_path = "static/backups/ref_counter.txt"
+
+    # Read current counter
+    if os.path.exists(counter_path):
+        with open(counter_path, "r") as f:
+            last_id = int(f.read().strip())
+    else:
+        last_id = 0
+
+    # Increment and write back
+    new_id = last_id + 1
+    with open(counter_path, "w") as f:
+        f.write(str(new_id))
+
+    reference_number = f"HAZJNB{str(new_id).zfill(4)}"
+
+    cursor.execute("""
+        INSERT INTO requests (
+            reference_number, service_type, collection_company, collection_address, collection_person, collection_number,
+            delivery_company, delivery_address, delivery_person, delivery_number,
+            client_reference, pickup_date, inco_terms, client_notes, pdf_path, timestamp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        reference_number, service_type, collection_company, collection_address, collection_person, collection_number,
+        delivery_company, delivery_address, delivery_person, delivery_number,
+        client_reference, pickup_date, inco_terms, client_notes, "", timestamp
+    ))
+    request_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    backup_database()
+
+    for file in uploaded_files:
+        contents = await file.read()
+        with open(f"static/uploads/{reference_number}_{file.filename}", "wb") as f:
+            f.write(contents)
+
+    # ✅ QR code now links to HAZJNB reference number
+    qr_url = f"https://hazmat-collection.onrender.com/confirm/{reference_number}"
+    qr_img = qrcode.make(qr_url)
+    qr_path = f"static/qrcodes/qr_{request_id}.png"
+    qr_img.save(qr_path)
+
+    pdf_path = f"static/waybills/waybill_{request_id}.pdf"
+    generate_pdf({
+        "reference_number": reference_number,
+        "service_type": service_type,
+        "collection_company": collection_company,
+        "collection_address": collection_address,
+        "collection_person": collection_person,
+        "collection_number": collection_number,
+        "delivery_company": delivery_company,
+        "delivery_address": delivery_address,
+        "delivery_person": delivery_person,
+        "delivery_number": delivery_number,
+        "client_reference": client_reference,
+        "pickup_date": pickup_date,
+        "inco_terms": inco_terms,
+        "client_notes": client_notes
+    }, request_id, qr_path, pdf_path)
+
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE requests SET pdf_path = ? WHERE id = ?", (pdf_path, request_id))
+    conn.commit()
+    conn.close()
+    backup_database()
+
+    return HTMLResponse(f"""
+    <html>
+      <head>
+        <title>Waybill Generated</title>
+        <style>
+          body {{
+            font-family: Segoe UI;
+            background: #ECEFF1;
+            text-align: center;
+            padding: 2rem;
+          }}
+          button {{
+            margin: 1rem;
+            padding: 0.75rem 1.5rem;
+            background-color: #388E3C;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 1rem;
+            cursor: pointer;
+          }}
+        </style>
+      </head>
+      <body>
+        <h1 style="color:#D32F2F;">Waybill Generated</h1>
+        <p>Your waybill is ready. Click below to view or download it:</p>
+        <button onclick="window.open('/pdf/{request_id}', '_blank')">📄 View Waybill PDF</button>
+        <button onclick="window.location.href='/thankyou'">✅ Continue</button>
+      </body>
+    </html>
+    """)
+
+@app.get("/pdf/{request_id}")
+def serve_pdf(request_id: int):
+    path = f"static/waybills/waybill_{request_id}.pdf"
+    file = open(path, "rb")
+    return StreamingResponse(
+        file,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="waybill_{request_id}.pdf"'}
+    )
+
+@app.get("/thankyou", response_class=HTMLResponse)
+def thank_you():
+    return HTMLResponse("""
+    <html><body style="font-family:Segoe UI; text-align:center; padding:2rem;">
+        <h1 style="color:#388E3C;">Thank you! Your request has been submitted.</h1>
+        <button onclick="window.location.href='/'" style="margin:1rem; padding:0.75rem 1.5rem; background-color:#D32F2F; color:white; border:none; border-radius:4px;">Book Another Collection</button>
+        <button onclick="window.location.href='/track'" style="margin:1rem; padding:0.75rem 1.5rem; background-color:#455A64; color:white; border:none; border-radius:4px;">Track a Collection</button>
+    </body></html>
+    """)
+
+# ✅ QR confirmation now uses HAZJNB reference
+@app.get("/confirm/{hazjnb_ref}", response_class=HTMLResponse)
+def confirm(hazjnb_ref: str):
+    return HTMLResponse(f"<h1>Driver confirmed request {hazjnb_ref}</h1>")
+
+
+@app.post("/assign")
+def assign_collection(payload: dict):
+    driver_code = payload.get("driver_code")
+    hazjnb_ref = payload.get("hazjnb_ref")
+
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
+
+    # Log incoming request
+    print(f"🚨 Assigning driver {driver_code} to reference {hazjnb_ref}")
+
+    # Run update
+    cursor.execute("""
+        UPDATE requests SET assigned_driver = ?, status = 'Assigned' WHERE reference_number = ?
+    """, (driver_code, hazjnb_ref))
+
+    conn.commit()
+    affected = cursor.rowcount
+    conn.close()
+
+    # Log result
+    if affected == 0:
+        print(f"❌ No matching reference_number found for {hazjnb_ref}")
+        return JSONResponse(content={"status": "error", "message": "Reference not found"}, status_code=404)
+
+    print(f"✅ Assignment succeeded for {hazjnb_ref}")
+    return {"status": "success", "driver": driver_code, "ref": hazjnb_ref}
+
+@app.get("/driver/{code}")
+def get_driver_jobs(code: str):
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT reference_number, collection_company, collection_address, pickup_date
+        FROM requests WHERE assigned_driver = ?
+    """, (code,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    jobs = []
+    for row in rows:
+        jobs.append({
+            "hazjnb_ref": row[0],
+            "company": row[1],
+            "address": row[2],
+            "pickup_date": row[3]
         })
-        print(f"[SIM] {direction.upper()} at {price:.5f} | dur {duration}s | {tick_time.strftime('%H:%M:%S')}")
 
-    async def check_simulated_exits(self, tick_time):
-        for sim in self.simulated_trades:
-            if sim["result"] is None and tick_time >= sim["exit_time"]:
-                exit_price = self.current_candle["close"]
-                sim["exit_price"] = exit_price
-                if sim["direction"] == "buy":
-                    sim["result"] = "win" if exit_price >= sim["entry_price"] else "loss"
-                else:
-                    sim["result"] = "win" if exit_price <= sim["entry_price"] else "loss"
-                # mark sim exit
-                self.current_candle.setdefault("exits", []).append({
-                    "price": exit_price, "result": sim["result"], "sim": True
-                })
-                print(f"[SIM RESULT] {sim['result'].upper()} at {exit_price:.5f} | {tick_time.strftime('%H:%M:%S')}")
+    return jobs
+@app.get("/ops/backup")
+def trigger_backup():
+    backup_database()
+    return {"status": "backup complete"}
 
-        # update mode from sim performance
-        sim_wr = self.simulation_winrate()
-        prev_mode = self.live_mode
-        self.live_mode = (sim_wr >= self.sim_required_winrate)
-        if self.live_mode != prev_mode:
-            print(f"[GATE] {'LIVE ENABLED' if self.live_mode else 'LIVE DISABLED'} | SimWR {sim_wr:.2%}")
+@app.post("/scan_qr")
+def scan_qr(payload: dict):
+    ref = payload.get("ref")
+    driver_id = payload.get("driver_id")
+    timestamp = datetime.now().isoformat()
 
-    def simulation_winrate(self):
-        recent = [s for s in self.simulated_trades if s["result"] is not None][-self.sim_backtest_window:]
-        if not recent:
-            return 0.0
-        wins = sum(1 for s in recent if s["result"] == "win")
-        return wins / len(recent)
+    conn = sqlite3.connect("hazmat.db")
+    cursor = conn.cursor()
 
-    # ------------- Live trading -------------
-
-    async def place_live_trade(self, direction, price, tick_time, duration=5):
-        await self.update_trade_amount()
-        amount = self.trade_amount
-
-        try:
-            if direction == "call":
-                trade_id, _ = await self.api.buy(
-                    asset=self.symbol,
-                    amount=amount,
-                    time=duration,
-                    check_win=False
-                )
-            elif direction == "put":
-                trade_id, _ = await self.api.sell(
-                    asset=self.symbol,
-                    amount=amount,
-                    time=duration,
-                    check_win=False
-                )
-            else:
-                print(f"[ERROR] Invalid direction: {direction}")
-                return
-
-            print(
-                f"[LIVE] {direction.upper()} {trade_id} at {price:.5f} | dur {duration}s | amt {amount:.2f} | {tick_time.strftime('%H:%M:%S')}")
-            self.live_trades[trade_id] = {
-                "direction": direction,
-                "entry_price": price,
-                "entry_time": tick_time,
-                "duration": duration
-            }
-
-        except Exception as e:
-            print(f"[ERROR] Live trade failed → {type(e).__name__}, {e}")
-
-    async def check_trade_exit_live(self, tick_time):
-        expired = []
-        for trade_id, trade in list(self.live_trades.items()):
-            entry_time = trade["entry_time"]
-            duration = trade["duration"]
-            expiry_time = entry_time + timedelta(seconds=duration)
-
-            if tick_time >= expiry_time:
-                direction = trade["direction"]
-                entry_price = trade["entry_price"]
-                current_price = self.current_candle["close"]
-
-                win = (direction == "call" and current_price > entry_price) or \
-                      (direction == "put" and current_price < entry_price)
-
-                self.trade_stats["total"] += 1
-                if win:
-                    self.trade_stats["wins"] += 1
-                    self.trade_stats["pnl"] += self.trade_amount
-                else:
-                    self.trade_stats["losses"] += 1
-                    self.trade_stats["pnl"] -= self.trade_amount
-                self.update_stats_label()
-                print(f"[RESULT] {direction.upper()} → {'WIN' if win else 'LOSS'} | PnL: {self.trade_stats['pnl']:.2f}")
-                expired.append(trade_id)
-
-        for trade_id in expired:
-            del self.live_trades[trade_id]
-
-    def update_stats_label(self):
-        stats = self.trade_stats
-        total = stats["total"]
-        wins = stats["wins"]
-        losses = stats["losses"]
-        winrate = (wins / total * 100) if total > 0 else 0.0
-        pnl = stats["pnl"]
-
-        self.stats_label.setText(
-            f"Trades: {total} | Wins: {wins} | Losses: {losses} | Winrate: {winrate:.1f}% | PNL: {pnl:.2f}"
+    # Log scan
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS scan_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reference_number TEXT,
+            driver_id TEXT,
+            timestamp TEXT
         )
+    """)
+    cursor.execute("""
+        INSERT INTO scan_log (reference_number, driver_id, timestamp)
+        VALUES (?, ?, ?)
+    """, (ref, driver_id, timestamp))
 
-    # ------------- Overlay & drawing -------------
+    # Update status
+    cursor.execute("""
+        UPDATE requests SET status = 'Collected' WHERE reference_number = ?
+    """, (ref,))
 
-    def update_debug_overlay(self):
-        sim_wr = self.simulation_winrate()
-        mode = "LIVE" if self.live_mode else "SIM"
-        text = f"{mode} | {self.last_overlay}" if self.last_overlay else f"{mode} | SimWR:{int(sim_wr*100)}%"
-        self.debug_text_item.setText(text)
+    conn.commit()
+    conn.close()
 
-    def draw_chart(self, forming=False):
-        candles = list(self.candle_data)
-        if forming and self.current_candle:
-            candles.append(self.current_candle.copy())
-        if not candles:
-            return
+    print(f"✅ QR scan logged and status updated for {ref}")
+    return {"status": "collected", "ref": ref, "driver": driver_id}
 
-        self.chart_widget.clear()
-        lows, highs = [], []
+def generate_pdf(data, request_id, qr_path, pdf_path):
+    c = canvas.Canvas(pdf_path, pagesize=A4)
+    width, height = A4
 
-        # ✅ Fixed 30‑minute window with reserved marker space
-        last_ts = candles[-1]['time'].timestamp()
-        x_max = last_ts + self.x_shift_seconds
-        x_min = x_max - self.window_seconds
+    c.setFillColor(HexColor("#ECEFF1"))
+    c.rect(0, 0, width, height, fill=1)
 
-        for c in candles:
-            t = c['time'].timestamp()
-            o, h, l, cl = c['open'], c['high'], c['low'], c['close']
-            lows.append(l);
-            highs.append(h)
-            color = 'g' if cl >= o else 'r'
-            self.chart_widget.plot([t, t], [l, h], pen=color)
-            self.chart_widget.plot([t, t], [o, cl], pen=pg.mkPen(color, width=12))
+    logo_path = "static/logo.png"
+    if os.path.exists(logo_path):
+        c.drawImage(logo_path, 20*mm, height - 30*mm, width=40*mm, height=20*mm, preserveAspectRatio=True, mask='auto')
 
-            # ✅ Clamp entry/exit markers inside window
-            for e in c.get("entries", []):
-                pos_x = min(max(t + self.x_shift_seconds, x_min + 1), x_max - 1)
-                arrow_angle = 90 if e["direction"] == "buy" else -90
-                arrow_color = 'y' if e.get("sim") else ('g' if e["direction"] == "buy" else 'r')
-                entry_arrow = pg.ArrowItem(
-                    pos=(pos_x, e["price"]),
-                    angle=arrow_angle,
-                    brush=arrow_color, pen=pg.mkPen(arrow_color),
-                    headLen=12, tipAngle=30, baseAngle=20
-                )
-                self.chart_widget.addItem(entry_arrow)
+    c.setFont("Helvetica-Bold", 22)
+    c.setFillColor(HexColor("#D32F2F"))
+    c.drawString(70*mm, height - 25*mm, "Hazmat Collection Waybill")
 
-            for ex in c.get("exits", []):
-                pos_x = min(max(t + self.x_shift_seconds, x_min + 1), x_max - 1)
-                label_color = 'y' if ex.get("sim") else 'w'
-                exit_marker = pg.ScatterPlotItem(
-                    x=[pos_x], y=[ex["price"]],
-                    pen=pg.mkPen(label_color), brush=label_color,
-                    size=(6 if ex.get("sim") else 8), symbol='o'
-                )
-                self.chart_widget.addItem(exit_marker)
+    def section(title, y):
+        c.setFont("Helvetica-Bold", 14)
+        c.setFillColor(HexColor("#455A64"))
+        c.drawString(20*mm, y, title)
+        c.setStrokeColor(HexColor("#B0BEC5"))
+        c.line(20*mm, y - 2*mm, width - 20*mm, y - 2*mm)
+        return y - 10*mm
 
-        # ✅ Y‑axis and X‑axis ranges
-        y_min, y_max = min(lows), max(highs)
-        pad = (y_max - y_min) * 0.03 if y_max > y_min else 0.001
-        self.chart_widget.setYRange(y_min - pad, y_max + pad)
-        self.chart_widget.setXRange(x_min, x_max, padding=0)
+    def field(label, value, y):
+        c.setFont("Helvetica", 10)
+        c.setFillColor(HexColor("#212121"))
+        c.drawString(25*mm, y, f"{label}:")
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(70 * mm, y, value or "—")
+        return y - 7 * mm
 
-        self.chart_widget.addItem(self.debug_text_item)
-        self.debug_text_item.setPos(x_min, y_max)
+    y = height - 50 * mm
+    y = section("Shipment Details", y)
+    y = field("Reference Number", data["reference_number"], y)
+    y = field("Service Type", data["service_type"], y)
+    y = field("Client Reference", data["client_reference"], y)
+    y = field("Pickup Date", data["pickup_date"], y)
+    y = field("Inco Terms", data["inco_terms"] or "N/A", y)
 
-    # ------------- Start/Stop -------------
+    y -= 5 * mm
+    y = section("Collection", y)
+    y = field("Company", data["collection_company"], y)
+    y = field("Address", data["collection_address"], y)
+    y = field("Contact Person", data["collection_person"], y)
+    y = field("Contact Number", data["collection_number"], y)
 
-    async def start_war_machine(self):
-        await self.connect_to_api()
-        self.stream_task = asyncio.create_task(self.stream_ticks_and_build_candles(self.symbol))
-        print("⚔️ War Machine activated: per-candle, simulation-first, fixed 30m window.")
+    y -= 5 * mm
+    y = section("Delivery", y)
+    y = field("Company", data["delivery_company"], y)
+    y = field("Address", data["delivery_address"], y)
+    y = field("Contact Person", data["delivery_person"], y)
+    y = field("Contact Number", data["delivery_number"], y)
 
-    async def stop_war_machine(self):
-        if self.stream_task and not self.stream_task.done():
-            self.stream_task.cancel()
-            try:
-                await self.stream_task
-            except asyncio.CancelledError:
-                pass
-        print("🛑 War Machine deactivated.")
+    y -= 5 * mm
+    y = section("Client Notes", y)
+    c.setFont("Helvetica", 10)
+    c.setFillColor(HexColor("#212121"))
+    c.drawString(25 * mm, y, data["client_notes"] or "None")
 
+    # QR Code
+    if os.path.exists(qr_path):
+        c.drawImage(qr_path, width - 50 * mm, 20 * mm, width=30 * mm, preserveAspectRatio=True, mask='auto')
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    loop = QEventLoop(app)
-    asyncio.set_event_loop(loop)
+    # Footer
+    c.setFont("Helvetica-Oblique", 8)
+    c.setFillColor(HexColor("#607D8B"))
+    c.drawString(20 * mm, 10 * mm, "Generated by Hazmat Global Logistics System")
 
-    gui = WarMachineGUI()
-    gui.show()
-
-    with loop:
-        loop.run_forever()
+    c.save()

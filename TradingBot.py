@@ -10,7 +10,8 @@ class WarMachineBot:
         self.mode = mode
         self.api = None
         self.cb = CandleBuilder()
-        self.engine = TradeEngine(self.cb)
+        self.engine = TradeEngine(self.cb, self.api)
+        self.cb.engine = self.engine  # ✅ Injected here
         self.last_tick_time = datetime.utcnow()
 
     async def connect(self):

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from core_indicators import ema, rsi, bollinger_bands, choppiness_index, kalman_smooth, detect_momentum_from_candles
 
 class CandleBuilder:
-    def __init__(self, storage_file="war_machine_candles.json", max_candles=200):
+    def __init__(self, storage_file="war_machine_candles.json", max_candles=200, engine=None):
         self.candle_data = []
         self.current_candle = None
         self.candle_start = None
@@ -11,6 +11,7 @@ class CandleBuilder:
         self.storage_file = storage_file
         self.max_candles = max_candles
         self.indicators = {}
+        self.engine = engine  # ✅ Now properly defined
 
         self.ensure_storage_file()
 
@@ -86,5 +87,18 @@ class CandleBuilder:
 
         momentum_dir, momentum_conf = detect_momentum_from_candles(self.candle_data)
         self.indicators["momentum"] = momentum_conf if momentum_dir else 0.0
+        required_keys = ["ema8", "ema21", "rsi", "momentum", "choppiness", "boll_low", "boll_high"]
+        i = self.indicators
+
+        def safe_fmt(val, fmt):
+            return format(val, fmt) if val is not None else "N/A"
+
+        conf_raw = getattr(self.engine, "last_confidence", None)
+        conf = format(conf_raw, ".2f") if conf_raw is not None else "N/A"
+
         print(
-            f"[INDICATORS] EMA8:{self.indicators['ema8']:.5f} | EMA21:{self.indicators['ema21']:.5f} | RSI:{self.indicators['rsi']:.1f} | Momentum:{self.indicators['momentum']:.2f} | Confidence:{self.indicators['confidence']:.2f}")
+            f"[INDICATORS] EMA8:{safe_fmt(i['ema8'], '.5f')} | EMA21:{safe_fmt(i['ema21'], '.5f')} | "
+            f"RSI:{safe_fmt(i['rsi'], '.1f')} | Momentum:{safe_fmt(i['momentum'], '.2f')} | "
+            f"Choppiness:{safe_fmt(i['choppiness'], '.1f')} | BollLow:{safe_fmt(i['boll_low'], '.5f')} | BollHigh:{safe_fmt(i['boll_high'], '.5f')} | "
+            f"Confidence:{conf}"
+        )
