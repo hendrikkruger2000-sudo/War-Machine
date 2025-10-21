@@ -70,6 +70,7 @@ class CandleBuilder:
             self.update_indicators()
 
     def update_indicators(self):
+        from core_indicators import compute_volatility
         if len(self.candle_data) < 50:
             return
 
@@ -93,12 +94,35 @@ class CandleBuilder:
         def safe_fmt(val, fmt):
             return format(val, fmt) if val is not None else "N/A"
 
+        def color(val, passed, fmt=".2f"):
+            return f"\033[92m{format(val, fmt)}\033[0m" if passed else f"\033[91m{format(val, fmt)}\033[0m"
+
+        i = self.indicators
+        price = self.candle_data[-1]["close"]
+        volatility = compute_volatility([c["close"] for c in self.candle_data[-20:]])
+        ema_gap = abs(i["ema8"] - i["ema21"])
+        upper_proximity = abs(price - i["boll_high"])
+        lower_proximity = abs(price - i["boll_low"])
         conf_raw = getattr(self.engine, "last_confidence", None)
         conf = format(conf_raw, ".2f") if conf_raw is not None else "N/A"
 
+        # Indicator gates
+        gap_ok = ema_gap >= 0.000005
+        momentum_ok = i["momentum"] >= 0.35
+        choppiness_ok = i["choppiness"] <= 85
+        rsi_ok = i["rsi"] < 47 or i["rsi"] > 53
+        upper_ok = upper_proximity < 0.00015
+        lower_ok = lower_proximity < 0.00015
+        vol_ok = 0.000008 <= volatility <= 0.00040
+
         print(
-            f"[INDICATORS] EMA8:{safe_fmt(i['ema8'], '.5f')} | EMA21:{safe_fmt(i['ema21'], '.5f')} | "
-            f"RSI:{safe_fmt(i['rsi'], '.1f')} | Momentum:{safe_fmt(i['momentum'], '.2f')} | "
-            f"Choppiness:{safe_fmt(i['choppiness'], '.1f')} | BollLow:{safe_fmt(i['boll_low'], '.5f')} | BollHigh:{safe_fmt(i['boll_high'], '.5f')} | "
+            f"[INDICATORS] EMA8:{format(i['ema8'], '.5f')} | EMA21:{format(i['ema21'], '.5f')} | "
+            f"RSI:{color(i['rsi'], rsi_ok, '.1f')} | Momentum:{color(i['momentum'], momentum_ok)} | "
+            f"Choppiness:{color(i['choppiness'], choppiness_ok, '.1f')} | BollLow:{format(i['boll_low'], '.5f')} | BollHigh:{format(i['boll_high'], '.5f')} | "
             f"Confidence:{conf}"
+        )
+
+        print(
+            f"[METRICS] Volatility:{color(volatility, vol_ok, '.8f')} | EMA Gap:{color(ema_gap, gap_ok, '.8f')} | "
+            f"Upper Proximity:{color(upper_proximity, upper_ok, '.8f')} | Lower Proximity:{color(lower_proximity, lower_ok, '.8f')}"
         )

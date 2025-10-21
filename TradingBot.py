@@ -13,6 +13,7 @@ class WarMachineBot:
         self.engine = TradeEngine(self.cb, self.api)
         self.cb.engine = self.engine  # ✅ Injected here
         self.last_tick_time = datetime.utcnow()
+        self.engine = TradeEngine(self.cb, self.api, symbol=self.symbol)
 
     async def connect(self):
         ssid_demo = '42["auth",{"session":"pb7m1jl316va2k7gro84qs5t8a","isDemo":1,"uid":95806403,"platform":2}]'
