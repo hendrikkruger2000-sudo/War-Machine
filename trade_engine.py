@@ -12,59 +12,71 @@ class TradeEngine:
         self.live_trades_history = {}
         self.sim_backtest_window = 5
         self.sim_required_winrate = 0.60
-        self.live_mode = False
+        self.live_mode = True
         self.loss_cluster_limit = 3
         self.trade_amount = 20.0
         self.base_stake_ratio = 0.02
         self.max_stake = 2000.0
         self.last_confidence = None
         from SimAudit import SimAudit
+        from GateInversionEngine import GateInversionEngine
+
+        self.inversion_engine = GateInversionEngine()
 
         self.audit = SimAudit()
 
     def should_enter_trade(self):
+        if not hasattr(self.cb, "metrics") or not hasattr(self.cb, "indicators"):
+            return None
+
         i = self.cb.indicators
-        required_keys = ["ema8", "ema21", "momentum", "rsi", "choppiness", "boll_low", "boll_high"]
-        if any(k not in i or i[k] is None for k in required_keys):
+        m = self.cb.metrics
+        inversions = self.inversion_engine.evaluate(i, m)
+
+        # 🔍 Setup classification
+        direction = None
+        if i["ema8"] > i["ema21"] and i["rsi"] > 53:
+            direction = "call"
+        elif i["ema8"] < i["ema21"] and i["rsi"] < 47:
+            direction = "put"
+        else:
+            if inversions.get("misalignment"):
+                direction = "call" if i["rsi"] > 50 else "put"
+
+        if not direction:
             return None
 
-        closes = [c["close"] for c in self.cb.candle_data[-20:]]
-        volatility = compute_volatility(closes)
-        if volatility < 0.000008 or volatility > 0.00040:
+        # ❌ Suppression logic
+        if i["rsi"] > 20 and m["lower_proximity"] > 0.00025:
+            return None
+        if i["choppiness"] < 10 and i["momentum"] < 0.7:
             return None
 
-        ema_gap = abs(i["ema8"] - i["ema21"])
-        if ema_gap < 0.000005:
+        # 📊 Scoring system
+        score = 0
+        if m["ema_gap"] > 0.0002: score += 1
+        if i["momentum"] > 0.65: score += 1
+        if i["rsi"] < 18 or i["rsi"] > 53: score += 1
+        if m["volatility"] < 0.0004: score += 1
+        if m["lower_proximity"] < 0.00015: score += 2  # 🔥 Strong reversal zone
+        if inversions.get("breakout_trigger") or inversions.get("compression_trigger"): score += 1
+        if i["choppiness"] > 15: score += 1  # 🧠 Compression breakout zone
+
+        # 🧠 Multi-candle confirmation
+        recent = self.cb.candle_data[-3:]
+        if direction == "call" and all(c["close"] > c["open"] for c in recent): score += 1
+        if direction == "put" and all(c["close"] < c["open"] for c in recent): score += 1
+
+        # 🔥 Confidence scaling
+        if score < 4:
             return None
 
-        if i["momentum"] < 0.35 or i["choppiness"] > 85:
-            return None
+        confidence = 0.65 + (score * 0.05)
+        confidence = min(confidence, 0.95)
 
-        recent = [s for s in self.simulated_trades if s.get("result") is not None][-5:]
-        losses = sum(1 for s in recent if s["result"] == "loss")
-        if losses >= 5:
-            return None
+        override = not (m["upper_proximity"] < 0.0005 or m["lower_proximity"] < 0.0005)
 
-        price = self.cb.candle_data[-1]["close"]
-        upper_proximity = abs(price - i["boll_high"])
-        lower_proximity = abs(price - i["boll_low"])
-
-        # Proximity override logic
-        proximity_required = True
-        if i["momentum"] >= 0.7 and ema_gap >= 0.0008:
-            proximity_required = False
-
-        if i["ema8"] < i["ema21"] and i["rsi"] > 53:
-            if not proximity_required or upper_proximity < 0.00015:
-                confidence = (i["momentum"] + (i["rsi"] - 50) / 50 + ema_gap * 10000) / 3
-                return "put", confidence, not proximity_required  # ← override flag
-
-        elif i["ema8"] > i["ema21"] and i["rsi"] < 47:
-            if not proximity_required or lower_proximity < 0.00015:
-                confidence = (i["momentum"] + (50 - i["rsi"]) / 50 + ema_gap * 10000) / 3
-                return "call", confidence, not proximity_required
-
-        return None
+        return direction, confidence, override, inversions
 
     def simulation_winrate(self):
         recent = [s for s in self.simulated_trades if s.get("result") is not None][-self.sim_backtest_window:]
@@ -73,7 +85,7 @@ class TradeEngine:
         wins = sum(1 for s in recent if s["result"] == "win")
         return wins / len(recent)
 
-    def simulate_trade(self, direction, price, tick_time, duration=5, override=False):
+    def simulate_trade(self, direction, price, tick_time, duration=5, override=False, inversion=None):
         expiry = tick_time + timedelta(seconds=duration)
         self.simulated_trades.append({
             "direction": direction,
@@ -81,22 +93,17 @@ class TradeEngine:
             "time": tick_time,
             "exit_time": expiry,
             "result": None,
-            "override": override
+            "override": override,
+            "inversion": inversion or {}
         })
 
-
-
     async def evaluate_trade(self, tick_time):
-        cooldown_seconds = 10
-        if self.last_trade_time and (tick_time - self.last_trade_time).total_seconds() < cooldown_seconds:
-            return
-
         result = self.should_enter_trade()
         if not result:
             self.last_confidence = None
             return
 
-        direction, confidence, override = result
+        direction, confidence, override, inversion_flags = result
         self.last_confidence = confidence
         await self.update_trade_amount(confidence)
         price = self.cb.candle_data[-1]["close"]
@@ -104,17 +111,7 @@ class TradeEngine:
         if self.live_mode and self.api:
             await self.place_live_trade(direction, price, tick_time, duration=5)
         else:
-            self.simulate_trade(direction, price, tick_time, duration=5, override=override)
-
-        self.last_trade_time = tick_time
-        print(
-            f"[TRADE] {direction.upper()} @ {price:.5f} | Confidence: {confidence:.2f} | Mode: {'LIVE' if self.live_mode else 'SIM'}")
-        sim_wr = self.simulation_winrate()
-        print(
-            f"[GATE] SimWR:{sim_wr:.2%} | Threshold:{self.sim_required_winrate:.2%} → LiveMode:{'ON' if self.live_mode else 'OFF'}")
-
-        if sim_wr >= self.sim_required_winrate:
-            self.live_mode = True
+            self.simulate_trade(direction, price, tick_time, duration=5, override=override, inversion=inversion_flags)
 
     async def update_trade_amount(self, confidence=0.0):
         try:
@@ -125,7 +122,7 @@ class TradeEngine:
         except Exception:
             self.trade_amount = 20.0
 
-    async def place_live_trade(self, direction, price, tick_time, duration=5):
+    async def place_live_trade(self, direction, price, tick_time, duration=15):
         amount = self.trade_amount
         try:
             if direction == "call":

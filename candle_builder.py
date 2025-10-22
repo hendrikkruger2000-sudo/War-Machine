@@ -88,8 +88,22 @@ class CandleBuilder:
 
         momentum_dir, momentum_conf = detect_momentum_from_candles(self.candle_data)
         self.indicators["momentum"] = momentum_conf if momentum_dir else 0.0
-        required_keys = ["ema8", "ema21", "rsi", "momentum", "choppiness", "boll_low", "boll_high"]
-        i = self.indicators
+
+        # ✅ Now calculate metrics BEFORE assigning them
+        price = self.candle_data[-1]["close"]
+        volatility = compute_volatility([c["close"] for c in self.candle_data[-20:]])
+        ema_gap = abs(self.indicators["ema8"] - self.indicators["ema21"])
+        upper_proximity = abs(price - self.indicators["boll_high"])
+        lower_proximity = abs(price - self.indicators["boll_low"])
+
+        # ✅ Now assign metrics safely
+        self.metrics = {
+            "volatility": volatility,
+            "ema_gap": ema_gap,
+            "upper_proximity": upper_proximity,
+            "lower_proximity": lower_proximity,
+            "momentum": self.indicators["momentum"]
+        }
 
         def safe_fmt(val, fmt):
             return format(val, fmt) if val is not None else "N/A"
