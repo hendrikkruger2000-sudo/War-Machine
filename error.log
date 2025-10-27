@@ -35,3 +35,5 @@
 2025-09-23T18:20:18.205038Z  WARN SubscriptionsApiModule: Failed to send termination signal: send to a half closed channel
 2025-09-23T18:40:26.634460Z ERROR Runner: WebSocket writer task failed to send message.
 2025-09-23T18:50:06.004848Z  WARN SubscriptionsApiModule: Failed to send termination signal: send to a half closed channel
+2025-10-24T23:31:57.751806Z  WARN SubscriptionsApiModule: Failed to send termination signal: send to a half closed channel
+2025-10-24T23:31:57.754698Z  WARN ApiModule: [binary_options_tools::pocketoption::modules::subscriptions::SubscriptionsApiModule] err=ChannelSender(ReceiveClosed)

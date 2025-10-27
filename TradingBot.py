@@ -41,7 +41,6 @@ class WarMachineBot:
         # subscribe_symbol may be sync (returning an iterable/list) or async (returning an async iterator/coroutine).
         sub_result = self.api.subscribe_symbol(self.symbol)
         stream = await _maybe_await(sub_result)
-        print(f"[STREAM] Subscribed to {self.symbol}")
 
         try:
             # If stream is a plain list/iterable of ticks (sync), iterate normally.
@@ -88,7 +87,7 @@ class WarMachineBot:
             await self.engine.evaluate_trade(tick_time)
 
         # Live-only: no simulated trades to resolve
-        await self.engine.check_live_trade_result_batch()
+        #await self.engine.check_live_trade_result_batch()
 
     async def start(self):
         await self.connect()
