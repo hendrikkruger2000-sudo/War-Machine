@@ -809,6 +809,94 @@ class KalmanFilterLevelTrend:
 # ------------------------------
 # Volatility estimators
 # ------------------------------
+
+def macd(prices: List[float],
+         fast_period: int = 12,
+         slow_period: int = 26,
+         signal_period: int = 9) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Returns (macd_line, signal_line, histogram) for latest price.
+    """
+    if len(prices) < slow_period + signal_period:
+        return None, None, None
+
+    def ema(series, period):
+        k = 2 / (period + 1)
+        ema_val = series[0]
+        for price in series[1:]:
+            ema_val = price * k + ema_val * (1 - k)
+        return ema_val
+
+    fast_ema = ema(prices[-fast_period:], fast_period)
+    slow_ema = ema(prices[-slow_period:], slow_period)
+    macd_line = fast_ema - slow_ema
+
+    macd_series = [prices[i] - ema(prices[i - slow_period + 1:i + 1], slow_period)
+                   for i in range(slow_period - 1, len(prices))]
+    signal_line = ema(macd_series[-signal_period:], signal_period)
+    histogram = macd_line - signal_line
+
+    return macd_line, signal_line, histogram
+
+def stochastic_rsi(prices: List[float],
+                   rsi_period: int = 14,
+                   stoch_period: int = 14) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Returns (%K, %D) of Stochastic RSI.
+    """
+    rsi_vals = rsi_series(prices, rsi_period)
+    valid_rsi = [r for r in rsi_vals if r is not None]
+    if len(valid_rsi) < stoch_period:
+        return None, None
+
+    recent_rsi = valid_rsi[-stoch_period:]
+    min_rsi = min(recent_rsi)
+    max_rsi = max(recent_rsi)
+    if max_rsi - min_rsi == 0:
+        return 0.5, 0.5
+
+    k = (recent_rsi[-1] - min_rsi) / (max_rsi - min_rsi)
+    d = sum(recent_rsi[-3:]) / 3 / 100
+    return k, d
+
+def atr(highs: List[float],
+        lows: List[float],
+        closes: List[float],
+        period: int = 14) -> Optional[float]:
+    """
+    Returns latest ATR value.
+    """
+    if len(closes) < period + 1:
+        return None
+
+    trs = []
+    for i in range(1, len(closes)):
+        tr = max(highs[i] - lows[i],
+                 abs(highs[i] - closes[i - 1]),
+                 abs(lows[i] - closes[i - 1]))
+        trs.append(tr)
+
+    return sum(trs[-period:]) / period
+
+def support_resistance_zones(prices: List[float],
+                              lookback: int = 20,
+                              tolerance: float = 0.0005) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Returns (support_level, resistance_level) based on recent swing highs/lows.
+    """
+    if len(prices) < lookback:
+        return None, None
+
+    recent = prices[-lookback:]
+    support = min(recent)
+    resistance = max(recent)
+
+    # Optional: round to nearest tolerance
+    support = round(support / tolerance) * tolerance
+    resistance = round(resistance / tolerance) * tolerance
+
+    return support, resistance
+
 def _safe_div(a: float, b: float, default: float = 0.0) -> float:
     return a / b if b not in (0.0, None) else default
 
