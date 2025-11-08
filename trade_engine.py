@@ -56,8 +56,9 @@ class TradeEngine:
 
     def evaluate_strategy_match(self, direction: str) -> bool:
         indicators = self.cb.indicators
-        required = ["ema8", "ema21", "rsi", "momentum", "choppiness", "boll_percent_b", "macd_histogram"]
-        if not all(k in indicators and indicators[k] is not None for k in required):
+        if not all(k in indicators and indicators[k] is not None for k in [
+            "ema8", "ema21", "rsi", "momentum", "choppiness", "boll_percent_b", "macd_histogram"
+        ]):
             return False
 
         rsi = indicators["rsi"]
@@ -83,15 +84,25 @@ class TradeEngine:
         else:
             zone_confirmed = False
 
-        return all([rsi_ok, momentum_ok, choppy_ok, boll_ok, macd_ok, ema_ok, zone_confirmed])
+        return all([
+            rsi_ok,
+            momentum_ok,
+            choppy_ok,
+            boll_ok,
+            macd_ok,
+            ema_ok,
+            zone_confirmed
+        ])
 
     async def evaluate_trade(self, tick_time: datetime) -> None:
         if not self._cooldown_ok(tick_time):
             return
 
         indicators = self.cb.indicators
-        required = ["ema8", "ema21", "rsi", "momentum", "choppiness", "boll_percent_b", "macd_histogram"]
-        if not all(k in indicators and indicators[k] is not None for k in required):
+        if not all(k in indicators and indicators[k] is not None for k in [
+            "ema8", "ema21", "rsi", "momentum", "choppiness", "boll_percent_b", "macd_histogram"
+        ]):
+            print("[WAIT] Indicators not seeded yet — waiting for warmup")
             return
 
         self.last_trade_time = tick_time
@@ -100,9 +111,12 @@ class TradeEngine:
 
         direction = await self.observe_candle_behavior(open_price, duration=5.0)
         if not direction:
+            print("[SKIP] No clear direction after 5s")
             return
 
-        if not self.evaluate_strategy_match(direction):
+        strategy_match = self.evaluate_strategy_match(direction)
+        if not strategy_match:
+            print("[SKIP] Strategy filters not aligned — no trade")
             return
 
         ema_gap = abs(indicators["ema8"] - indicators["ema21"])
@@ -116,6 +130,8 @@ class TradeEngine:
 
         if self.live_mode and self.api:
             await self.place_live_trade(direction, close_price, tick_time, duration)
+        else:
+            print("[SIM] Trade skipped — live mode disabled")
 
     async def update_trade_amount(self, confidence: float = 0.0) -> None:
         try:
@@ -149,7 +165,7 @@ class TradeEngine:
             exit_price = result_data.get("closePrice") or 0.0
             conf = self.last_confidence or 0.0
 
-            print(f"[TRADE] {tick_time.isoformat()} | {direction.upper()} | Result: {result} | Exit: {exit_price:.5f} | Confidence: {conf:.2f}")
+            print(f"[TRADE] ID:{trade_id} | Direction:{direction} | Result:{result} | Exit:{exit_price:.5f} | Confidence:{conf:.2f}")
 
         except Exception as e:
-            print(f"[ERROR] Trade failed: {e}")
+            print(f"[ERROR] Live trade failed: {e}")
